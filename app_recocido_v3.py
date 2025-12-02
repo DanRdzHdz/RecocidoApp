@@ -117,6 +117,7 @@ with tab1:
         with col2:
             new_emissivity = st.number_input("Emisividad", 0.05, 0.5, 0.15)
             new_conductivity = st.number_input("Conductividad base (W/m·K)", 30.0, 60.0, 50.0)
+            new_cp = st.number_input("Calor específico (J/kg·K)", 400, 700, 500)
         
         if st.form_submit_button("Crear Perfil"):
             if new_name:
@@ -125,7 +126,8 @@ with tab1:
                     description=new_desc,
                     density=new_density,
                     emissivity=new_emissivity,
-                    thermal_conductivity_coeffs=(new_conductivity, -0.01, 0.0)
+                    thermal_conductivity_coeffs=(new_conductivity, -0.01, 0.0),
+                    specific_heat_coeffs=(float(new_cp), 0.0, 0.0)  # Valor constante
                 )
                 SteelProfileLibrary.add_profile(new_profile)
                 st.success(f"Perfil '{new_name}' creado exitosamente")
