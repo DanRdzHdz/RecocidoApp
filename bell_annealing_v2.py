@@ -1,0 +1,603 @@
+"""
+Modelo de Recocido en Campana v2.0
+==================================
+Mejoras sobre v1:
+1. Interacción térmica ENTRE bobinas (no independientes)
+2. Efecto de posición en el stack
+3. Calibrado con datos reales (405 corridas)
+
+Autor: Claude (Anthropic)
+Fecha: 2025
+"""
+
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
+from steel_profiles import SteelProfile, SteelProfileLibrary, Coil, FurnaceStack
+
+
+# =============================================================================
+# PROPIEDADES DEL GAS (Hidrógeno)
+# =============================================================================
+
+class HydrogenProperties:
+    """Propiedades termofísicas del H2 vs temperatura"""
+    
+    @staticmethod
+    def thermal_conductivity(T):
+        """λ en W/(m·K), T en K"""
+        return 0.0786 + 4.29e-4 * T - 4.0e-8 * T**2
+    
+    @staticmethod
+    def density(T, P=101325):
+        """ρ en kg/m³, T en K, P en Pa"""
+        M = 2.016e-3  # kg/mol
+        R = 8.314
+        return P * M / (R * T)
+    
+    @staticmethod
+    def specific_heat(T):
+        """cp en J/(kg·K), T en K"""
+        return 14300 + 0.5 * (T - 300)
+    
+    @staticmethod
+    def viscosity(T):
+        """μ en Pa·s, T en K"""
+        return 4.0e-6 + 2.5e-8 * T
+    
+    @staticmethod
+    def prandtl(T):
+        """Número de Prandtl"""
+        cp = HydrogenProperties.specific_heat(T)
+        mu = HydrogenProperties.viscosity(T)
+        k = HydrogenProperties.thermal_conductivity(T)
+        return cp * mu / k
+
+
+# =============================================================================
+# CONFIGURACIÓN DEL HORNO
+# =============================================================================
+
+@dataclass
+class FurnaceConfig:
+    """Parámetros del horno de recocido"""
+    total_gas_flow: float = 150.0  # m³/h de H2
+    convection_enhancement: float = 3.0  # Factor ψ (calibrado con datos reales)
+    radiation_enhancement: float = 1.0  # Factor ξ
+    inter_coil_conductance: float = 50.0  # W/(m²·K) - conductancia entre bobinas
+    position_factor: float = 0.15  # Penalización para bobinas del medio
+
+
+# =============================================================================
+# CICLO DE RECOCIDO
+# =============================================================================
+
+class AnnealingCycle:
+    """Ciclo de recocido con plateau dinámico y perfiles lineales"""
+    
+    def __init__(self, T_plateau: float = 700.0, threshold: float = 3.0,
+                 T_initial: float = 50.0, T_final: float = 100.0,
+                 heating_time: float = 13.0, cooling_time: float = 10.0):
+        """
+        Args:
+            T_plateau: Temperatura de plateau [°C]
+            threshold: Umbral para terminar plateau [°C]
+            T_initial: Temperatura inicial [°C]
+            T_final: Temperatura final después de enfriamiento [°C]
+            heating_time: Tiempo de calentamiento [h]
+            cooling_time: Tiempo de enfriamiento [h]
+        """
+        self.T_plateau = T_plateau + 273.15  # K
+        self.T_plateau_C = T_plateau
+        self.threshold = threshold
+        self.T_initial = T_initial
+        self.T_final = T_final
+        self.heating_time = heating_time
+        self.cooling_time = cooling_time
+        
+        # Perfil de calentamiento LINEAL [h, °C]
+        self._heating_times = [0, heating_time]
+        self._heating_temps = [T_initial + 273.15, T_plateau + 273.15]
+        
+        # Perfil de enfriamiento LINEAL [h desde inicio enfriamiento, °C]
+        self._cooling_times = [0, cooling_time]
+        self._cooling_temps = [T_plateau + 273.15, T_final + 273.15]
+        
+        # Estado del ciclo
+        self.phase = 'heating'
+        self.plateau_start = None
+        self.cooling_start = None
+        self.annealing_time = None  # Tiempo cuando termina el plateau
+    
+    def get_temperature(self, time_h: float) -> float:
+        """Obtiene temperatura del gas en K para un tiempo dado"""
+        if self.phase == 'heating':
+            return np.interp(time_h, self._heating_times, self._heating_temps)
+        elif self.phase == 'plateau':
+            return self.T_plateau
+        else:  # cooling
+            t_rel = time_h - self.cooling_start
+            return np.interp(t_rel, self._cooling_times, self._cooling_temps)
+    
+    def start_plateau(self, time_h: float):
+        self.phase = 'plateau'
+        self.plateau_start = time_h
+    
+    def should_end_plateau(self, T_cold: float) -> bool:
+        """Verifica si el cold spot está suficientemente cerca del plateau"""
+        delta = self.T_plateau - T_cold
+        return delta <= self.threshold
+    
+    def start_cooling(self, time_h: float):
+        self.phase = 'cooling'
+        self.cooling_start = time_h
+        self.annealing_time = time_h  # Guardar tiempo de recocido
+    
+    def is_finished(self, time_h: float) -> bool:
+        if self.phase != 'cooling' or self.cooling_start is None:
+            return False
+        return (time_h - self.cooling_start) >= self.cooling_time
+
+
+# =============================================================================
+# CALCULADOR DE PROPIEDADES TÉRMICAS
+# =============================================================================
+
+class ThermalCalculator:
+    """Calcula propiedades térmicas efectivas de una bobina"""
+    
+    STEFAN_BOLTZMANN = 5.67e-8
+    
+    def __init__(self, coil: Coil):
+        self.coil = coil
+        self.profile = SteelProfileLibrary.get_profile(coil.profile_name)
+        self._calc_geometry()
+    
+    def _calc_geometry(self):
+        """Calcula parámetros geométricos"""
+        self.r_out = self.coil.outer_diameter / 2
+        self.r_in = self.coil.inner_diameter / 2
+        self.thickness = self.coil.thickness
+        self.width = self.coil.width
+        
+        # Número de capas
+        radial_thickness = self.r_out - self.r_in
+        self.n_layers = radial_thickness / self.thickness
+    
+    def steel_conductivity(self, T: float) -> float:
+        """Conductividad del acero en W/(m·K)"""
+        a, b, c = self.profile.thermal_conductivity_coeffs
+        T_C = T - 273.15
+        return a + b * T_C + c * T_C**2
+    
+    def steel_specific_heat(self, T: float) -> float:
+        """Calor específico del acero en J/(kg·K)"""
+        a, b, c = self.profile.specific_heat_coeffs
+        T_C = T - 273.15
+        return a + b * T_C + c * T_C**2
+    
+    def radial_conductivity(self, T_mean: float, T_gas: float) -> float:
+        """
+        Conductividad efectiva radial considerando:
+        - Conducción en acero
+        - Radiación entre capas
+        - Gas en gaps
+        - Contacto mecánico
+        
+        NOTA: Calibrado con datos reales (405 corridas).
+        Se usa un factor de mejora para capturar efectos no modelados
+        (penetración de gas, contacto mejorado bajo presión, etc.)
+        """
+        lambda_steel = self.steel_conductivity(T_mean)
+        
+        # Resistencia de media capa de acero
+        R_steel = self.thickness / (2 * lambda_steel)
+        
+        # Resistencia por radiación (gap entre capas)
+        eps = self.profile.emissivity
+        h_rad = 4 * self.STEFAN_BOLTZMANN * eps * T_mean**3
+        R_rad = 1 / h_rad if h_rad > 0 else 1e6
+        
+        # Resistencia del gas en el gap
+        # El gas penetra parcialmente entre las capas bajo presión
+        gap = 5e-6  # m (reducido - mejor contacto bajo presión)
+        lambda_gas = HydrogenProperties.thermal_conductivity(T_mean)
+        R_gas = gap / lambda_gas
+        
+        # Resistencia de contacto mecánico (mejorada bajo presión del stack)
+        R_contact = 2e-5  # m²·K/W (reducido)
+        
+        # Resistencias en paralelo para el gap
+        R_parallel = 1 / (1/R_rad + 1/R_gas + 1/R_contact)
+        
+        # Resistencia total de una interfaz
+        R_interface = 2 * R_steel + R_parallel
+        
+        # Conductividad efectiva radial
+        lambda_r = self.thickness / R_interface
+        
+        # Factor de mejora empírico (calibrado con datos reales)
+        # Captura: penetración de gas convectivo, mejor contacto, etc.
+        enhancement_factor = 2.5
+        
+        return lambda_r * enhancement_factor
+    
+    def axial_conductivity(self, T: float) -> float:
+        """Conductividad efectiva axial (dirección del ancho)"""
+        # En dirección axial, la conducción es principalmente a través del acero
+        return self.steel_conductivity(T) * 0.8  # Factor por gaps de aire
+
+
+# =============================================================================
+# SIMULADOR CON INTERACCIÓN ENTRE BOBINAS
+# =============================================================================
+
+class BellAnnealingSimulatorV2:
+    """
+    Simulador mejorado con:
+    - Interacción térmica entre bobinas
+    - Efecto de posición en el stack
+    - Calibración empírica
+    """
+    
+    def __init__(self, stack: FurnaceStack, config: FurnaceConfig, cycle: AnnealingCycle):
+        self.stack = stack
+        self.config = config
+        self.cycle = cycle
+        
+        # Crear calculadores térmicos para cada bobina
+        self.calculators = [ThermalCalculator(coil) for coil in stack.coils]
+        
+        # Parámetros de discretización
+        self.nr = 20  # Nodos radiales
+        self.nz = 15  # Nodos axiales (ancho)
+        self.dt = 5.0  # Paso de tiempo [s]
+        
+        # Factor de posición: bobinas del medio tienen peor acceso al gas
+        self._calc_position_factors()
+    
+    def _calc_position_factors(self):
+        """Calcula factores de penalización por posición"""
+        n = self.stack.num_coils
+        self.position_factors = []
+        
+        for i in range(n):
+            # Posición normalizada (0 = fondo, 1 = arriba)
+            pos = i / (n - 1) if n > 1 else 0.5
+            
+            # Las bobinas del medio (pos ~0.5) tienen peor acceso
+            # Factor = 1 - k * (1 - |2*pos - 1|) donde k es la penalización
+            distance_from_edge = 1 - abs(2 * pos - 1)
+            factor = 1 - self.config.position_factor * distance_from_edge
+            
+            self.position_factors.append(factor)
+    
+    def _init_temperatures(self) -> List[np.ndarray]:
+        """Inicializa campos de temperatura para cada bobina"""
+        T_init = self.cycle.T_initial + 273.15
+        T_fields = []
+        
+        for _ in range(self.stack.num_coils):
+            T = np.ones((self.nr, self.nz)) * T_init
+            T_fields.append(T)
+        
+        return T_fields
+    
+    def _calc_convection_coeff(self, T_gas: float, coil_idx: int) -> float:
+        """
+        Calcula coeficiente de convección para una bobina.
+        
+        NOTA: En hornos de recocido industriales, el gas se recircula
+        forzadamente con ventiladores, resultando en coeficientes de
+        convección mucho mayores que los calculados para flujo natural.
+        
+        Valores típicos en hornos industriales: h = 50-200 W/(m²·K)
+        """
+        # Coeficiente base para hornos de recocido (valor empírico)
+        h_base = 80.0  # W/(m²·K) - típico para recirculación forzada
+        
+        # Factor de temperatura (h aumenta con temperatura)
+        T_factor = (T_gas / 973.15) ** 0.5  # Normalizado a 700°C
+        
+        # Factor de mejora del usuario
+        h = h_base * T_factor * self.config.convection_enhancement
+        
+        # Factor de posición (bobinas del medio tienen menor acceso al gas)
+        h *= self.position_factors[coil_idx]
+        
+        return max(h, 20.0)  # Mínimo 20 W/(m²·K)
+    
+    def _step_coil(self, T: np.ndarray, T_gas: float, calc: ThermalCalculator, 
+                   h_conv: float, T_above: Optional[np.ndarray], 
+                   T_below: Optional[np.ndarray]) -> np.ndarray:
+        """
+        Avanza un paso de tiempo para una bobina.
+        Incluye interacción con bobinas adyacentes.
+        """
+        T_new = T.copy()
+        
+        coil = calc.coil
+        profile = calc.profile
+        
+        # Propiedades
+        rho = profile.density
+        T_mean = np.mean(T)
+        cp = calc.steel_specific_heat(T_mean)
+        lambda_r = calc.radial_conductivity(T_mean, T_gas)
+        lambda_z = calc.axial_conductivity(T_mean)
+        
+        # Difusividades
+        alpha_r = lambda_r / (rho * cp)
+        alpha_z = lambda_z / (rho * cp)
+        
+        # Espaciado de malla
+        dr = (coil.outer_diameter - coil.inner_diameter) / 2 / self.nr
+        dz = coil.width / self.nz
+        
+        # Factores para diferencias finitas
+        Fr = alpha_r * self.dt / dr**2
+        Fz = alpha_z * self.dt / dz**2
+        
+        # Estabilidad
+        if Fr > 0.25 or Fz > 0.25:
+            substeps = int(max(Fr, Fz) / 0.2) + 1
+            dt_sub = self.dt / substeps
+            Fr = alpha_r * dt_sub / dr**2
+            Fz = alpha_z * dt_sub / dz**2
+        else:
+            substeps = 1
+        
+        for _ in range(substeps):
+            T_old = T_new.copy()
+            
+            # Interior
+            for i in range(1, self.nr - 1):
+                r = coil.inner_diameter/2 + (i + 0.5) * dr
+                for j in range(1, self.nz - 1):
+                    # Difusión radial (coordenadas cilíndricas)
+                    d2T_dr2 = (T_old[i+1, j] - 2*T_old[i, j] + T_old[i-1, j])
+                    dT_dr = (T_old[i+1, j] - T_old[i-1, j]) / 2
+                    term_r = Fr * (d2T_dr2 + dT_dr * dr / r)
+                    
+                    # Difusión axial
+                    d2T_dz2 = (T_old[i, j+1] - 2*T_old[i, j] + T_old[i, j-1])
+                    term_z = Fz * d2T_dz2
+                    
+                    T_new[i, j] = T_old[i, j] + term_r + term_z
+            
+            # Condiciones de frontera
+            
+            # Superficie exterior (r = r_out): convección con gas
+            Bi_out = h_conv * dr / lambda_r
+            for j in range(self.nz):
+                T_new[-1, j] = (T_old[-2, j] + Bi_out * T_gas) / (1 + Bi_out)
+            
+            # Superficie interior (r = r_in): convección con gas (canal central)
+            h_in = h_conv * 0.5  # Menor convección en el canal central
+            Bi_in = h_in * dr / lambda_r
+            for j in range(self.nz):
+                T_new[0, j] = (T_old[1, j] + Bi_in * T_gas) / (1 + Bi_in)
+            
+            # Superficie superior (z = width): intercambio con bobina de arriba o gas
+            h_top = self.config.inter_coil_conductance if T_above is not None else h_conv
+            T_boundary_top = T_above[:, 0] if T_above is not None else np.full(self.nr, T_gas)
+            Bi_top = h_top * dz / lambda_z
+            for i in range(self.nr):
+                T_new[i, -1] = (T_old[i, -2] + Bi_top * T_boundary_top[i]) / (1 + Bi_top)
+            
+            # Superficie inferior (z = 0): intercambio con bobina de abajo o gas
+            h_bot = self.config.inter_coil_conductance if T_below is not None else h_conv
+            T_boundary_bot = T_below[:, -1] if T_below is not None else np.full(self.nr, T_gas)
+            Bi_bot = h_bot * dz / lambda_z
+            for i in range(self.nr):
+                T_new[i, 0] = (T_old[i, 1] + Bi_bot * T_boundary_bot[i]) / (1 + Bi_bot)
+        
+        return T_new
+    
+    def simulate(self, max_time_h: float = 50.0, save_interval: int = 60) -> Dict:
+        """
+        Ejecuta la simulación completa.
+        
+        Args:
+            max_time_h: Tiempo máximo de simulación [h]
+            save_interval: Intervalo de guardado [s]
+        
+        Returns:
+            Diccionario con resultados
+        """
+        # Inicializar
+        T_coils = self._init_temperatures()
+        
+        results = {
+            'time': [],
+            'T_gas': [],
+            'T_hot': [[] for _ in range(self.stack.num_coils)],
+            'T_cold': [[] for _ in range(self.stack.num_coils)],
+            'T_mean': [[] for _ in range(self.stack.num_coils)],
+            'phase': []
+        }
+        
+        time_s = 0
+        max_time_s = max_time_h * 3600
+        last_save = -save_interval
+        
+        print(f"Simulando {self.stack.num_coils} bobinas...")
+        
+        while time_s < max_time_s:
+            time_h = time_s / 3600
+            
+            # Obtener cold spot más frío de todas las bobinas
+            T_cold_min = min(T_coils[i][self.nr//2, self.nz//2] 
+                            for i in range(self.stack.num_coils))
+            
+            # Transiciones de fase
+            if self.cycle.phase == 'heating' and time_h >= self.cycle.heating_time:
+                self.cycle.start_plateau(time_h)
+                print(f"  PLATEAU @ {time_h:.1f}h")
+            
+            elif self.cycle.phase == 'plateau' and self.cycle.should_end_plateau(T_cold_min):
+                self.cycle.start_cooling(time_h)
+                duration = time_h - self.cycle.plateau_start
+                print(f"  ENFRIAMIENTO @ {time_h:.1f}h (plateau: {duration:.1f}h)")
+            
+            elif self.cycle.is_finished(time_h):
+                print(f"  FIN @ {time_h:.1f}h")
+                break
+            
+            T_gas = self.cycle.get_temperature(time_h)
+            
+            # Calcular coeficientes de convección
+            h_convs = [self._calc_convection_coeff(T_gas, i) 
+                      for i in range(self.stack.num_coils)]
+            
+            # Actualizar cada bobina con interacción
+            T_coils_new = []
+            for i in range(self.stack.num_coils):
+                # Bobinas adyacentes
+                T_below = T_coils[i-1] if i > 0 else None
+                T_above = T_coils[i+1] if i < self.stack.num_coils - 1 else None
+                
+                T_new = self._step_coil(
+                    T_coils[i], T_gas, self.calculators[i], h_convs[i],
+                    T_above, T_below
+                )
+                T_coils_new.append(T_new)
+            
+            T_coils = T_coils_new
+            
+            # Guardar resultados
+            if time_s - last_save >= save_interval:
+                results['time'].append(time_h)
+                results['T_gas'].append(T_gas - 273.15)
+                results['phase'].append(self.cycle.phase)
+                
+                for i in range(self.stack.num_coils):
+                    # Hot spot: superficie exterior, centro axial
+                    T_hot = T_coils[i][-1, self.nz//2] - 273.15
+                    # Cold spot: centro radial, centro axial
+                    T_cold = T_coils[i][self.nr//2, self.nz//2] - 273.15
+                    # Media
+                    T_mean = np.mean(T_coils[i]) - 273.15
+                    
+                    results['T_hot'][i].append(T_hot)
+                    results['T_cold'][i].append(T_cold)
+                    results['T_mean'][i].append(T_mean)
+                
+                last_save = time_s
+            
+            time_s += self.dt
+        
+        # Convertir a arrays
+        results['time'] = np.array(results['time'])
+        results['T_gas'] = np.array(results['T_gas'])
+        for i in range(self.stack.num_coils):
+            results['T_hot'][i] = np.array(results['T_hot'][i])
+            results['T_cold'][i] = np.array(results['T_cold'][i])
+            results['T_mean'][i] = np.array(results['T_mean'][i])
+        
+        return results
+
+
+# =============================================================================
+# MODELO SIMPLIFICADO CALIBRADO (para predicción rápida)
+# =============================================================================
+
+class CalibratedModel:
+    """
+    Modelo empírico calibrado con 405 corridas reales.
+    
+    Predice tiempo de plateau basado en:
+    - Ancho promedio de bobinas
+    - Espesor promedio
+    - Temperatura de saturación
+    - Número de bobinas
+    """
+    
+    # Coeficientes calibrados con 405 corridas reales (regresión lineal)
+    INTERCEPT = 18.6816
+    COEF_ANCHO = 0.001624  # h/mm (más ancho → más tiempo)
+    COEF_ESPESOR = -0.0357  # h/mm (más espesor → menos tiempo en datos reales)
+    COEF_TEMP = -0.017883  # h/°C (más temperatura → menos tiempo)
+    COEF_NBOB = -0.0165  # h/bobina
+    
+    @classmethod
+    def predict_plateau_time(cls, ancho_mm: float, espesor_mm: float,
+                            T_sat_C: float, n_bobinas: int) -> float:
+        """
+        Predice tiempo de plateau en horas.
+        
+        Args:
+            ancho_mm: Ancho promedio de bobinas [mm]
+            espesor_mm: Espesor promedio de lámina [mm]
+            T_sat_C: Temperatura de saturación [°C]
+            n_bobinas: Número de bobinas
+        
+        Returns:
+            Tiempo de plateau estimado [h]
+        """
+        tiempo = (cls.INTERCEPT 
+                 + cls.COEF_ANCHO * ancho_mm
+                 + cls.COEF_ESPESOR * espesor_mm
+                 + cls.COEF_TEMP * T_sat_C
+                 + cls.COEF_NBOB * n_bobinas)
+        
+        return max(5.0, min(15.0, tiempo))  # Limitar a rango razonable
+
+
+# =============================================================================
+# FUNCIONES DE UTILIDAD
+# =============================================================================
+
+def quick_simulate(stack: FurnaceStack, T_plateau_C: float = 680.0,
+                   heating_time: float = 10.0, psi: float = 2.0) -> Dict:
+    """Simulación rápida con parámetros por defecto"""
+    
+    config = FurnaceConfig(
+        total_gas_flow=150.0,
+        convection_enhancement=psi,
+        inter_coil_conductance=50.0,
+        position_factor=0.15
+    )
+    
+    cycle = AnnealingCycle(
+        T_plateau=T_plateau_C,
+        threshold=3.0,
+        T_initial=50.0,
+        T_final=100.0,
+        heating_time=heating_time,
+        cooling_time=8.0
+    )
+    
+    simulator = BellAnnealingSimulatorV2(stack, config, cycle)
+    results = simulator.simulate(max_time_h=40.0)
+    
+    return {
+        'results': results,
+        'annealing_time': cycle.annealing_time,
+        'plateau_duration': cycle.annealing_time - heating_time if cycle.annealing_time else None
+    }
+
+
+if __name__ == "__main__":
+    # Prueba rápida
+    from steel_profiles import create_quick_coil
+    
+    SteelProfileLibrary.initialize_defaults()
+    
+    # Crear stack de prueba
+    stack = FurnaceStack()
+    stack.add_coil(create_quick_coil("B1", "SPCC", 1750, 600, 1200, 1.0))
+    stack.add_coil(create_quick_coil("B2", "SPCC", 1750, 600, 1200, 1.0))
+    stack.add_coil(create_quick_coil("B3", "SPCC", 1750, 600, 1200, 1.0))
+    stack.add_coil(create_quick_coil("B4", "SPCC", 1750, 600, 1200, 1.0))
+    
+    # Simular
+    result = quick_simulate(stack, T_plateau_C=680)
+    
+    print(f"\nResultado:")
+    print(f"  Tiempo de recocido: {result['annealing_time']:.2f} h")
+    print(f"  Duración plateau: {result['plateau_duration']:.2f} h")
+    
+    # Comparar con modelo calibrado
+    t_pred = CalibratedModel.predict_plateau_time(1200, 1.0, 680, 4)
+    print(f"  Predicción calibrada: {t_pred:.2f} h")
