@@ -257,33 +257,41 @@ class ConvectionCalculator:
 # =============================================================================
 
 class AnnealingCycle:
-    """Ciclo de recocido con plateau dinámico"""
+    """Ciclo de recocido con plateau dinámico y perfiles lineales"""
     
-    def __init__(self, T_plateau: float = 700.0, threshold: float = 3.0):
+    def __init__(self, T_plateau: float = 700.0, threshold: float = 3.0,
+                 T_initial: float = 50.0, T_final: float = 100.0,
+                 heating_time: float = 13.0, cooling_time: float = 10.0):
         """
         Args:
             T_plateau: Temperatura de plateau [°C]
             threshold: Umbral para terminar plateau [°C]
+            T_initial: Temperatura inicial [°C]
+            T_final: Temperatura final después de enfriamiento [°C]
+            heating_time: Tiempo de calentamiento [h]
+            cooling_time: Tiempo de enfriamiento [h]
         """
         self.T_plateau = T_plateau + 273.15  # K
+        self.T_plateau_C = T_plateau
         self.threshold = threshold
+        self.T_initial = T_initial
+        self.T_final = T_final
+        self.heating_time = heating_time
+        self.cooling_time = cooling_time
         
-        # Perfil de calentamiento [h, °C]
-        self._heating_times = [0, 0.5, 1, 1.5, 2, 2.5, 2.75, 3, 3.25, 3.5, 4,
-                               5, 6, 7, 8, 9, 10, 11, 12, 13]
-        self._heating_temps = [50, 150, 250, 320, 380, 400, 350, 300, 350, 410, 450,
-                               475, 510, 550, 590, 610, 650, 660, 680, T_plateau]
-        self._heating_temps = [t + 273.15 for t in self._heating_temps]
+        # Perfil de calentamiento LINEAL [h, °C]
+        self._heating_times = [0, heating_time]
+        self._heating_temps = [T_initial + 273.15, T_plateau + 273.15]
         
-        # Perfil de enfriamiento [h desde inicio enfriamiento, °C]
-        self._cooling_times = [0, 0.2, 1, 2, 3, 4, 5, 5.5, 6, 7, 8, 9, 10]
-        self._cooling_temps = [T_plateau, 660, 640, 610, 570, 520, 470, 380, 420, 380, 330, 280, 100]
-        self._cooling_temps = [t + 273.15 for t in self._cooling_temps]
+        # Perfil de enfriamiento LINEAL [h desde inicio enfriamiento, °C]
+        self._cooling_times = [0, cooling_time]
+        self._cooling_temps = [T_plateau + 273.15, T_final + 273.15]
         
         # Estado
         self.phase = 'heating'
         self.plateau_start = None
         self.cooling_start = None
+        self.annealing_time = None  # Tiempo cuando se completa el recocido
     
     def get_temperature(self, time_h: float) -> float:
         """Obtiene temperatura del gas según fase actual"""
@@ -308,6 +316,7 @@ class AnnealingCycle:
     def start_cooling(self, time_h: float):
         self.phase = 'cooling'
         self.cooling_start = time_h
+        self.annealing_time = time_h  # El recocido se completa cuando inicia enfriamiento
     
     def should_end_plateau(self, T_cold: float) -> bool:
         """Verifica si cold spot alcanzó el umbral"""

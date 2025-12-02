@@ -33,16 +33,36 @@ st.markdown("---")
 # SIDEBAR - Configuración del ciclo y horno
 # =============================================================================
 
-st.sidebar.header("⚙️ Configuración del Ciclo")
+st.sidebar.header("🌡️ Perfil de Temperatura")
 
+st.sidebar.subheader("Calentamiento")
+T_initial = st.sidebar.number_input(
+    "Temperatura inicial (°C)", 
+    min_value=20, max_value=100, value=50, step=5
+)
+heating_time = st.sidebar.number_input(
+    "Tiempo de calentamiento (h)", 
+    min_value=1.0, max_value=20.0, value=13.0, step=0.5
+)
+
+st.sidebar.subheader("Plateau (Saturación)")
 T_plateau = st.sidebar.slider(
     "Temperatura de Plateau (°C)", 
     min_value=600, max_value=800, value=700, step=10
 )
-
 threshold = st.sidebar.slider(
     "Umbral ΔT para terminar plateau (°C)", 
     min_value=1.0, max_value=10.0, value=3.0, step=0.5
+)
+
+st.sidebar.subheader("Enfriamiento")
+cooling_time = st.sidebar.number_input(
+    "Tiempo de enfriamiento (h)", 
+    min_value=1.0, max_value=20.0, value=10.0, step=0.5
+)
+T_final = st.sidebar.number_input(
+    "Temperatura final (°C)", 
+    min_value=50, max_value=200, value=100, step=10
 )
 
 st.sidebar.markdown("---")
@@ -57,6 +77,24 @@ psi = st.sidebar.slider(
     "Factor ψ (convección)", 
     min_value=1.0, max_value=3.0, value=2.0, step=0.1
 )
+
+# Mostrar perfil en sidebar
+st.sidebar.markdown("---")
+st.sidebar.subheader("📈 Perfil del Ciclo")
+fig_mini, ax_mini = plt.subplots(figsize=(4, 2))
+# Dibujar perfil simplificado
+t_profile = [0, heating_time, heating_time + 5, heating_time + 5 + cooling_time]
+T_profile = [T_initial, T_plateau, T_plateau, T_final]
+ax_mini.plot(t_profile, T_profile, 'r-', lw=2)
+ax_mini.fill_between(t_profile, T_profile, alpha=0.3)
+ax_mini.set_xlabel('Tiempo (h)', fontsize=8)
+ax_mini.set_ylabel('T (°C)', fontsize=8)
+ax_mini.tick_params(labelsize=7)
+ax_mini.set_ylim([0, 800])
+ax_mini.grid(True, alpha=0.3)
+st.sidebar.pyplot(fig_mini)
+plt.close()
+st.sidebar.caption("*El plateau se extiende hasta alcanzar el umbral")
 
 # =============================================================================
 # TABS PRINCIPALES
@@ -209,10 +247,10 @@ with tab3:
         st.warning("⚠️ Primero configura las bobinas en la pestaña 'Configurar Bobinas'")
     else:
         # Resumen de configuración
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown("**Configuración del Stack:**")
+            st.markdown("**📦 Stack:**")
             st.write(f"- Bobinas: {len(st.session_state.bobinas)}")
             masa_total = sum(
                 np.pi * ((b['od']/2000)**2 - (b['id']/2000)**2) * (b['width']/1000) * 7850
@@ -221,10 +259,15 @@ with tab3:
             st.write(f"- Masa total: ~{masa_total:.0f} kg")
         
         with col2:
-            st.markdown("**Configuración del Ciclo:**")
-            st.write(f"- Plateau: {T_plateau}°C")
-            st.write(f"- Umbral: {threshold}°C")
+            st.markdown("**🌡️ Perfil Térmico:**")
+            st.write(f"- Calentamiento: {heating_time}h ({T_initial}→{T_plateau}°C)")
+            st.write(f"- Plateau: {T_plateau}°C (umbral {threshold}°C)")
+            st.write(f"- Enfriamiento: {cooling_time}h (→{T_final}°C)")
+        
+        with col3:
+            st.markdown("**🌀 Horno:**")
             st.write(f"- Flujo gas: {gas_flow} m³/h")
+            st.write(f"- Factor ψ: {psi}")
         
         st.markdown("---")
         
@@ -251,7 +294,15 @@ with tab3:
                     convection_enhancement=psi
                 )
                 
-                cycle = AnnealingCycle(T_plateau=T_plateau, threshold=threshold)
+                # Ciclo con parámetros personalizados
+                cycle = AnnealingCycle(
+                    T_plateau=T_plateau, 
+                    threshold=threshold,
+                    T_initial=T_initial,
+                    T_final=T_final,
+                    heating_time=heating_time,
+                    cooling_time=cooling_time
+                )
                 
                 # Simular
                 simulator = BellAnnealingSimulator(stack, config, cycle)
@@ -259,35 +310,77 @@ with tab3:
             
             st.success("✅ Simulación completada!")
             
-            # Mostrar resultados
-            st.markdown("### 📊 Resultados")
+            # =================================================================
+            # TIEMPOS IMPORTANTES
+            # =================================================================
+            st.markdown("### ⏱️ Tiempos del Proceso")
             
-            # Métricas principales
+            col_t1, col_t2, col_t3 = st.columns(3)
+            
+            with col_t1:
+                st.metric(
+                    label="🔥 Tiempo de Recocido",
+                    value=f"{cycle.annealing_time:.1f} h",
+                    help="Tiempo hasta que el acero está completamente recocido (fin del plateau)"
+                )
+            
+            with col_t2:
+                plateau_duration = cycle.annealing_time - heating_time
+                st.metric(
+                    label="⏸️ Duración del Plateau",
+                    value=f"{plateau_duration:.1f} h",
+                    help="Tiempo que se mantuvo en temperatura de saturación"
+                )
+            
+            with col_t3:
+                st.metric(
+                    label="🕐 Tiempo Total del Ciclo",
+                    value=f"{results['time'][-1]:.1f} h",
+                    help="Tiempo total incluyendo enfriamiento"
+                )
+            
+            st.markdown("---")
+            
+            # =================================================================
+            # TEMPERATURAS ALCANZADAS
+            # =================================================================
+            st.markdown("### 🌡️ Temperaturas Máximas del Cold Spot")
+            
             cols = st.columns(len(st.session_state.bobinas))
             for i, col in enumerate(cols):
                 with col:
                     T_cold_max = max(results['coils'][i]['T_cold'])
+                    delta = T_cold_max - T_plateau
                     st.metric(
                         label=f"{i+1}# {results['coils'][i]['coil_id']}",
                         value=f"{T_cold_max:.1f}°C",
-                        delta=f"{T_cold_max - T_plateau:.1f}°C vs objetivo"
+                        delta=f"{delta:.1f}°C vs objetivo",
+                        delta_color="normal" if abs(delta) <= threshold else "inverse"
                     )
             
-            st.write(f"**Tiempo total del ciclo:** {results['time'][-1]:.1f} horas")
+            st.markdown("---")
             
-            # Gráfica
+            # =================================================================
+            # GRÁFICA
+            # =================================================================
             st.markdown("### 📈 Curvas de Temperatura")
             
-            fig, axes = plt.subplots(1, len(st.session_state.bobinas), 
-                                    figsize=(5*len(st.session_state.bobinas), 4))
+            n_bobinas = len(st.session_state.bobinas)
+            if n_bobinas <= 2:
+                fig, axes = plt.subplots(1, n_bobinas, figsize=(6*n_bobinas, 5))
+            else:
+                fig, axes = plt.subplots(2, 2, figsize=(12, 10))
             
-            if len(st.session_state.bobinas) == 1:
+            if n_bobinas == 1:
                 axes = [axes]
+            elif n_bobinas > 2:
+                axes = axes.flatten()
             
             time = np.array(results['time'])
             T_gas = np.array(results['T_gas'])
             
-            for idx, ax in enumerate(axes):
+            for idx in range(n_bobinas):
+                ax = axes[idx]
                 T_cold = np.array(results['coils'][idx]['T_cold'])
                 T_hot = np.array(results['coils'][idx]['T_hot'])
                 
@@ -300,6 +393,12 @@ with tab3:
                 ax.fill_between(time, T_cold, T_hot, where=(diff > 0),
                                color='yellow', alpha=0.3)
                 
+                # Línea vertical en tiempo de recocido
+                ax.axvline(x=cycle.annealing_time, color='green', linestyle=':', lw=2, label='Recocido completo')
+                
+                # Línea horizontal del objetivo
+                ax.axhline(y=T_plateau, color='purple', linestyle='--', alpha=0.5, lw=1)
+                
                 ax.set_title(f"{idx+1}# {results['coils'][idx]['coil_id']}\nT_cold máx: {max(T_cold):.1f}°C")
                 ax.set_xlabel('Tiempo [h]')
                 ax.set_ylabel('Temperatura [°C]')
@@ -307,14 +406,21 @@ with tab3:
                 ax.grid(True, alpha=0.3)
                 ax.set_ylim([0, 800])
             
+            # Ocultar subplots vacíos
+            for idx in range(n_bobinas, len(axes)):
+                axes[idx].axis('off')
+            
             plt.tight_layout()
             st.pyplot(fig)
+            plt.close()
             
-            # Tabla de resultados
+            # =================================================================
+            # TABLA RESUMEN
+            # =================================================================
             st.markdown("### 📋 Resumen por Bobina")
             
             data = []
-            for i in range(len(st.session_state.bobinas)):
+            for i in range(n_bobinas):
                 T_cold = results['coils'][i]['T_cold']
                 T_hot = results['coils'][i]['T_hot']
                 data.append({
@@ -323,7 +429,7 @@ with tab3:
                     'Perfil': results['coils'][i]['profile'],
                     'T_cold máx (°C)': f"{max(T_cold):.1f}",
                     'T_hot máx (°C)': f"{max(T_hot):.1f}",
-                    'ΔT vs objetivo': f"{max(T_cold) - T_plateau:.1f}"
+                    'ΔT vs objetivo (°C)': f"{max(T_cold) - T_plateau:.1f}"
                 })
             
             st.table(data)
@@ -343,27 +449,38 @@ with tab4:
     
     ### Pasos para usar:
     
-    1. **Perfiles de Acero** (opcional)
+    1. **Configurar Perfil Térmico** (barra lateral izquierda)
+       - **Calentamiento**: Temperatura inicial y tiempo para llegar al plateau
+       - **Plateau**: Temperatura de saturación y umbral para determinar cuándo el acero está recocido
+       - **Enfriamiento**: Tiempo y temperatura final
+    
+    2. **Perfiles de Acero** (opcional)
        - Revisa los perfiles predefinidos o crea uno nuevo con propiedades personalizadas
     
-    2. **Configurar Bobinas**
+    3. **Configurar Bobinas**
        - Agrega las bobinas que irán en el horno
        - Define las dimensiones de cada una (diámetros, ancho, espesor)
        - El orden de abajo hacia arriba es: 1#, 2#, 3#, 4#
     
-    3. **Configurar Ciclo** (barra lateral)
-       - **Temperatura de Plateau**: Temperatura objetivo del recocido (típico: 680-720°C)
-       - **Umbral ΔT**: El plateau termina cuando el cold spot está a menos de este valor del gas
-    
     4. **Simular**
        - Ejecuta la simulación y observa los resultados
-       - El **cold spot** (centro de la bobina) debe alcanzar cerca de la temperatura objetivo
+       - El **Tiempo de Recocido** indica cuándo el acero está completamente recocido
     
     ### Conceptos clave:
     
     - **Hot spot**: Esquina exterior de la bobina (se calienta primero)
     - **Cold spot**: Centro de la bobina (se calienta más lento)
+    - **Tiempo de Recocido**: Momento en que el cold spot alcanza la temperatura objetivo (fin del plateau)
     - **Plateau dinámico**: El tiempo de remojo se ajusta automáticamente hasta que el cold spot alcanza la temperatura
+    
+    ### Interpretación de resultados:
+    
+    | Indicador | Significado |
+    |-----------|-------------|
+    | 🔥 Tiempo de Recocido | Cuándo el acero está listo (fin del plateau) |
+    | ⏸️ Duración del Plateau | Tiempo adicional de remojo necesario |
+    | 🕐 Tiempo Total | Duración completa incluyendo enfriamiento |
+    | Línea verde punteada | Momento en que se completa el recocido |
     
     ### Perfiles predefinidos:
     
