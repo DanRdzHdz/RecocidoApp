@@ -39,9 +39,9 @@ col1, col2 = st.sidebar.columns(2)
 with col1:
     T_initial = st.number_input("T inicial (°C)", 20, 100, 50)
 with col2:
-    heating_time = st.number_input("Calentamiento (h)", 1.0, 20.0, 20.0, 0.5)
+    heating_time = st.number_input("Calentamiento (h)", 1.0, 30.0, 20.0, 0.5)
 
-T_plateau = st.sidebar.slider("Temperatura Plateau (°C)", 600, 750, 703)
+T_plateau = st.sidebar.slider("Temperatura Plateau (°C)", 600, 750, 680)
 threshold = st.sidebar.slider("Umbral ΔT (°C)", 1.0, 10.0, 3.0, 0.5)
 
 col1, col2 = st.sidebar.columns(2)
@@ -51,8 +51,8 @@ with col2:
     T_final = st.number_input("T final (°C)", 50, 200, 100)
 
 st.sidebar.subheader("Parámetros del Horno")
-psi = st.sidebar.slider("Factor ψ (convección)", 1.0, 5.0, 3.0, 0.1)
-gas_flow = st.sidebar.slider("Flujo H₂ (m³/h)", 100, 250, 150)
+psi = st.sidebar.slider("Factor ψ (convección)", 1.0, 10.0, 3.6, 0.1)
+gas_flow = st.sidebar.slider("Flujo H₂ (m³/h)", 100, 250, 162)
 
 # Mini gráfica del perfil
 fig_mini, ax_mini = plt.subplots(figsize=(4, 2))
@@ -153,7 +153,7 @@ with tab2:
                 id_val = st.number_input("Diámetro interior (mm)", 400, 800, 600, 10)
             with col2:
                 width = st.number_input("Ancho (mm)", 600, 1500, 1100, 10)
-                thickness = st.number_input("Espesor lámina (mm)", 0.3, 10.0, 1.0, 0.1)
+                thickness = st.number_input("Espesor lámina (mm)", 0.30, 4.00, 1.30, 0.05)
             
             if st.form_submit_button("Agregar al Stack", use_container_width=True):
                 new_coil = create_quick_coil(
@@ -264,8 +264,9 @@ with tab3:
                 config = FurnaceConfig(
                     total_gas_flow=float(gas_flow),
                     convection_enhancement=float(psi),
-                    inter_coil_conductance=50.0,
-                    position_factor=0.15
+                    inter_coil_conductance=100.0,
+                    position_factor=0.15,
+                    industrial_calibration=2.5  # Configuración de compromiso
                 )
                 
                 cycle = AnnealingCycle(
@@ -358,6 +359,144 @@ with tab3:
             plt.tight_layout()
             st.pyplot(fig)
             plt.close(fig)
+            
+            # =================================================================
+            # MAPAS DE CALOR DE SECCIÓN TRANSVERSAL
+            # =================================================================
+            if 'T_fields' in results and len(results['T_fields']) > 0:
+                st.subheader("🔥 Mapas de Calor - Sección Transversal")
+                st.caption("Distribución de temperatura en la sección radial-axial de la bobina")
+                
+                # Selector de bobina para visualizar
+                bobina_idx = st.selectbox(
+                    "Seleccionar bobina para visualizar",
+                    range(st.session_state.stack.num_coils),
+                    format_func=lambda x: f"Bobina {x+1}# - {st.session_state.stack.coils[x].coil_id}"
+                )
+                
+                # Obtener dimensiones de la bobina
+                coil = st.session_state.stack.coils[bobina_idx]
+                r_in = coil.inner_diameter * 1000 / 2  # mm
+                r_out = coil.outer_diameter * 1000 / 2  # mm
+                width = coil.width * 1000  # mm
+                
+                # Crear figura con 5 subplots
+                n_snapshots = len(results['snapshot_times'])
+                fig_hm, axes_hm = plt.subplots(1, n_snapshots, figsize=(3.5*n_snapshots, 4))
+                
+                if n_snapshots == 1:
+                    axes_hm = [axes_hm]
+                
+                # Etiquetas para cada snapshot
+                labels = ['Inicio', 'Mitad\ncalent.', 'Fin\ncalent.', 'Mitad\nplateau', 'Fin\nplateau']
+                
+                # Lista para guardar los colorbars individuales
+                images = []
+                
+                for i, (t, ax_hm) in enumerate(zip(results['snapshot_times'], axes_hm)):
+                    T_field = results['T_fields'][i][bobina_idx]
+                    
+                    # Crear meshgrid para la visualización
+                    nr, nz = T_field.shape
+                    r = np.linspace(r_in, r_out, nr)
+                    z = np.linspace(0, width, nz)
+                    R, Z = np.meshgrid(r, z, indexing='ij')
+                    
+                    # Escala individual para cada snapshot
+                    T_min_local = T_field.min()
+                    T_max_local = T_field.max()
+                    
+                    # Si ΔT es muy pequeño, expandir el rango para mejor visualización
+                    if T_max_local - T_min_local < 5:
+                        T_mid = (T_max_local + T_min_local) / 2
+                        T_min_local = T_mid - 5
+                        T_max_local = T_mid + 5
+                    
+                    # Graficar heatmap con escala individual
+                    im = ax_hm.pcolormesh(Z, R, T_field, shading='auto', 
+                                          cmap='hot', vmin=T_min_local, vmax=T_max_local)
+                    images.append(im)
+                    
+                    # Colorbar individual para cada subplot
+                    cbar = fig_hm.colorbar(im, ax=ax_hm, shrink=0.7, pad=0.02)
+                    cbar.ax.tick_params(labelsize=7)
+                    cbar.set_label('°C', fontsize=8)
+                    
+                    # Etiquetas
+                    label = labels[i] if i < len(labels) else f"t={t:.1f}h"
+                    ax_hm.set_title(f"{label}\nt = {t:.1f} h", fontsize=10)
+                    ax_hm.set_xlabel("Axial z (mm)", fontsize=9)
+                    if i == 0:
+                        ax_hm.set_ylabel("Radio r (mm)", fontsize=9)
+                    ax_hm.tick_params(labelsize=8)
+                    
+                    # Posiciones FIJAS de hot spot y cold spot (no buscar mínimo/máximo)
+                    # Cold spot: centro geométrico de la sección
+                    cold_r_idx = nr // 2
+                    cold_z_idx = nz // 2
+                    cold_r = r[cold_r_idx]
+                    cold_z = z[cold_z_idx]
+                    T_cold = T_field[cold_r_idx, cold_z_idx]
+                    
+                    # Hot spot: superficie exterior, centro axial
+                    hot_r_idx = nr - 1  # Superficie exterior
+                    hot_z_idx = nz // 2  # Centro axial
+                    hot_r = r[hot_r_idx]
+                    hot_z = z[hot_z_idx]
+                    T_hot = T_field[hot_r_idx, hot_z_idx]
+                    
+                    # Marcar HOT SPOT (superficie exterior)
+                    ax_hm.plot(hot_z, hot_r, 'o', markersize=12, markerfacecolor='none', 
+                              markeredgecolor='lime', markeredgewidth=2.5)
+                    ax_hm.annotate(f'HOT\n{T_hot:.0f}°C', xy=(hot_z, hot_r), 
+                                  xytext=(hot_z + width*0.15, hot_r - (r_out-r_in)*0.1),
+                                  fontsize=7, fontweight='bold', color='white',
+                                  ha='left', va='top',
+                                  bbox=dict(boxstyle='round,pad=0.2', facecolor='darkred', alpha=0.9),
+                                  arrowprops=dict(arrowstyle='->', color='lime', lw=1.5))
+                    
+                    # Marcar COLD SPOT (centro geométrico)
+                    ax_hm.plot(cold_z, cold_r, 's', markersize=10, markerfacecolor='none',
+                              markeredgecolor='cyan', markeredgewidth=2.5)
+                    ax_hm.annotate(f'COLD\n{T_cold:.0f}°C', xy=(cold_z, cold_r),
+                                  xytext=(cold_z - width*0.15, cold_r + (r_out-r_in)*0.1),
+                                  fontsize=7, fontweight='bold', color='white',
+                                  ha='right', va='bottom',
+                                  bbox=dict(boxstyle='round,pad=0.2', facecolor='darkblue', alpha=0.9),
+                                  arrowprops=dict(arrowstyle='->', color='cyan', lw=1.5))
+                    
+                    # Mostrar ΔT en esquina
+                    dT = T_hot - T_cold
+                    ax_hm.text(0.05, 0.95, f"ΔT={dT:.0f}°C", 
+                              transform=ax_hm.transAxes, fontsize=8, va='top',
+                              bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.9))
+                
+                fig_hm.suptitle(f"Evolución del Campo de Temperatura - {coil.coil_id}", 
+                               fontsize=12, fontweight='bold', y=1.02)
+                
+                plt.tight_layout()
+                st.pyplot(fig_hm)
+                plt.close(fig_hm)
+                
+                # Explicación
+                with st.expander("ℹ️ Interpretación de los mapas de calor"):
+                    st.markdown("""
+                    **Ejes:**
+                    - **Eje horizontal (z)**: Dirección axial (ancho de la bobina)
+                    - **Eje vertical (r)**: Dirección radial (desde el centro hacia afuera)
+                    
+                    **Marcadores:**
+                    - 🔺 **Triángulo rojo (Hot spot)**: Punto más caliente (superficie exterior)
+                    - ⭐ **Estrella azul (Cold spot)**: Punto más frío (centro de la bobina)
+                    
+                    **ΔT**: Diferencia entre temperatura máxima y mínima en cada instante.
+                    
+                    **Comportamiento típico:**
+                    1. **Inicio**: Temperatura uniforme
+                    2. **Calentamiento**: Gradiente radial significativo (exterior caliente, interior frío)
+                    3. **Plateau**: Gradiente se reduce progresivamente
+                    4. **Fin plateau**: Temperatura casi uniforme (ΔT ≈ umbral)
+                    """)
             
             # Tabla resumen por bobina
             st.subheader("Resumen por Bobina")
