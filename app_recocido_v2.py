@@ -153,7 +153,7 @@ with tab2:
                 id_val = st.number_input("Diámetro interior (mm)", 400, 800, 600, 10)
             with col2:
                 width = st.number_input("Ancho (mm)", 600, 1500, 1100, 10)
-                thickness = st.number_input("Espesor lámina (mm)", 0.3, 1.0, 1.0, 0.1)
+                thickness = st.number_input("Espesor lámina (mm)", 0.3, 10.0, 1.0, 0.1)
             
             if st.form_submit_button("Agregar al Stack", use_container_width=True):
                 new_coil = create_quick_coil(
