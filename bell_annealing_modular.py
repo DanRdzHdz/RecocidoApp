@@ -618,7 +618,7 @@ if __name__ == "__main__":
     # Configuración del horno
     config = FurnaceConfig(
         total_gas_flow=150.0,
-        convection_enhancement=2.0,
+        convection_enhancement=1.6,
         radiation_enhancement=1.2
     )
     
