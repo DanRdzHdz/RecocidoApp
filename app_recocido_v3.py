@@ -101,6 +101,8 @@ with tab1:
                 st.write(f"**Descripción:** {profile.description}")
                 st.write(f"- Densidad: {profile.density} kg/m³")
                 st.write(f"- Emisividad: {profile.emissivity}")
+                st.write(f"- Conductividad: {profile.thermal_conductivity_coeffs[0]:.1f} W/m·K")
+                st.write(f"- Calor específico: {profile.specific_heat_coeffs[0]:.0f} J/kg·K")
                 st.write(f"- Dureza: {profile.hardness/1e6:.1f} MPa")
     
     st.divider()
