@@ -39,9 +39,9 @@ col1, col2 = st.sidebar.columns(2)
 with col1:
     T_initial = st.number_input("T inicial (°C)", 20, 100, 50)
 with col2:
-    heating_time = st.number_input("Calentamiento (h)", 1.0, 20.0, 10.0, 0.5)
+    heating_time = st.number_input("Calentamiento (h)", 1.0, 20.0, 20.0, 0.5)
 
-T_plateau = st.sidebar.slider("Temperatura Plateau (°C)", 600, 750, 680)
+T_plateau = st.sidebar.slider("Temperatura Plateau (°C)", 600, 750, 703)
 threshold = st.sidebar.slider("Umbral ΔT (°C)", 1.0, 10.0, 3.0, 0.5)
 
 col1, col2 = st.sidebar.columns(2)
