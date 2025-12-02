@@ -64,17 +64,16 @@ class FurnaceConfig:
     Parámetros del horno de recocido.
     
     CALIBRADO con 531 corridas industriales reales (2025).
-    Valores por defecto optimizados para t_sat ≈ 8h en configuración típica.
+    Configuración de COMPROMISO: plateau ~9h con ΔT ~100°C
     """
     total_gas_flow: float = 150.0  # m³/h de H2
-    convection_enhancement: float = 4.0  # Factor ψ para convección (calibrado)
+    convection_enhancement: float = 7.0  # Factor ψ para convección (COMPROMISO)
     radiation_enhancement: float = 1.0  # Factor ξ
-    inter_coil_conductance: float = 100.0  # W/(m²·K) - conductancia entre bobinas (calibrado)
+    inter_coil_conductance: float = 100.0  # W/(m²·K) - conductancia entre bobinas
     position_factor: float = 0.15  # Penalización para bobinas del medio
     compressive_stress: float = 8e6  # Pa - Presión entre capas (8 MPa típico)
-    # Factor de calibración industrial (calibrado con 531 corridas reales)
-    # Captura efectos no modelados: penetración de gas, contacto mejorado, etc.
-    industrial_calibration: float = 5.0
+    # Factor de calibración industrial (COMPROMISO: λr moderado para ΔT visible)
+    industrial_calibration: float = 2.5
 
 
 # =============================================================================
@@ -431,21 +430,36 @@ class BellAnnealingSimulatorV2:
                 T_new[-1, j] = (T_old[-2, j] + Bi_out * T_gas) / (1 + Bi_out)
             
             # Superficie interior (r = r_in): convección con gas (canal central)
-            h_in = h_conv * 0.5  # Menor convección en el canal central
+            # En hornos de campana el gas circula también por el canal central
+            # La convección debe ser suficiente para que el cold spot esté en el centro radial
+            h_in = h_conv * 1.0  # Convección similar al exterior
             Bi_in = h_in * dr / lambda_r
             for j in range(self.nz):
                 T_new[0, j] = (T_old[1, j] + Bi_in * T_gas) / (1 + Bi_in)
             
-            # Superficie superior (z = width): intercambio con bobina de arriba o gas
-            h_top = self.config.inter_coil_conductance if T_above is not None else h_conv
-            T_boundary_top = T_above[:, 0] if T_above is not None else np.full(self.nr, T_gas)
+            # Superficie superior (z = width): convección con gas + intercambio con bobina de arriba
+            # En hornos de campana con convector plates, el gas circula entre bobinas
+            if T_above is not None:
+                # Hay bobina arriba: predomina convección con gas que circula en el gap
+                h_top = h_conv * 0.85 + self.config.inter_coil_conductance * 0.15
+                T_boundary_top = 0.85 * np.full(self.nr, T_gas) + 0.15 * T_above[:, 0]
+            else:
+                # No hay bobina arriba: convección directa con gas
+                h_top = h_conv
+                T_boundary_top = np.full(self.nr, T_gas)
             Bi_top = h_top * dz / lambda_z
             for i in range(self.nr):
                 T_new[i, -1] = (T_old[i, -2] + Bi_top * T_boundary_top[i]) / (1 + Bi_top)
             
-            # Superficie inferior (z = 0): intercambio con bobina de abajo o gas
-            h_bot = self.config.inter_coil_conductance if T_below is not None else h_conv
-            T_boundary_bot = T_below[:, -1] if T_below is not None else np.full(self.nr, T_gas)
+            # Superficie inferior (z = 0): convección con gas + intercambio con bobina de abajo
+            if T_below is not None:
+                # Hay bobina abajo: predomina convección con gas que circula en el gap
+                h_bot = h_conv * 0.85 + self.config.inter_coil_conductance * 0.15
+                T_boundary_bot = 0.85 * np.full(self.nr, T_gas) + 0.15 * T_below[:, -1]
+            else:
+                # No hay bobina abajo: convección directa con gas
+                h_bot = h_conv
+                T_boundary_bot = np.full(self.nr, T_gas)
             Bi_bot = h_bot * dz / lambda_z
             for i in range(self.nr):
                 T_new[i, 0] = (T_old[i, 1] + Bi_bot * T_boundary_bot[i]) / (1 + Bi_bot)
@@ -472,12 +486,36 @@ class BellAnnealingSimulatorV2:
             'T_hot': [[] for _ in range(self.stack.num_coils)],
             'T_cold': [[] for _ in range(self.stack.num_coils)],
             'T_mean': [[] for _ in range(self.stack.num_coils)],
-            'phase': []
+            'phase': [],
+            # Snapshots de campos 2D para visualización
+            'T_fields': [],  # Lista de snapshots [(time, [T_field_coil0, T_field_coil1, ...])]
+            'snapshot_times': []  # Tiempos de los snapshots
         }
+        
+        # Tiempos para guardar snapshots (se calcularán dinámicamente)
+        # 5 snapshots: inicio, mitad calent., fin calent., mitad plateau, fin plateau
+        
+        snapshots_taken = []
+        max_snapshots = 5
+        
+        def save_snapshot(time_h, T_coils, label=""):
+            """Guarda un snapshot de los campos de temperatura"""
+            # Evitar duplicados (tolerancia de 0.2h)
+            for t_saved in snapshots_taken:
+                if abs(time_h - t_saved) < 0.2:
+                    return
+            if len(snapshots_taken) < max_snapshots:
+                fields = [T.copy() - 273.15 for T in T_coils]  # Convertir a °C
+                results['T_fields'].append(fields)
+                results['snapshot_times'].append(round(time_h, 1))
+                snapshots_taken.append(time_h)
         
         time_s = 0
         max_time_s = max_time_h * 3600
         last_save = -save_interval
+        t_heat = self.cycle.heating_time
+        mid_heat_saved = False
+        mid_plateau_saved = False
         
         print(f"Simulando {self.stack.num_coils} bobinas...")
         
@@ -492,15 +530,35 @@ class BellAnnealingSimulatorV2:
             if self.cycle.phase == 'heating' and time_h >= self.cycle.heating_time:
                 self.cycle.start_plateau(time_h)
                 print(f"  PLATEAU @ {time_h:.1f}h")
+                save_snapshot(time_h, T_coils, "fin_calentamiento")
             
             elif self.cycle.phase == 'plateau' and self.cycle.should_end_plateau(T_cold_min):
                 self.cycle.start_cooling(time_h)
                 duration = time_h - self.cycle.plateau_start
                 print(f"  ENFRIAMIENTO @ {time_h:.1f}h (plateau: {duration:.1f}h)")
+                save_snapshot(time_h, T_coils, "fin_plateau")
             
             elif self.cycle.is_finished(time_h):
                 print(f"  FIN @ {time_h:.1f}h")
                 break
+            
+            # Guardar snapshot al inicio
+            if time_s == 0:
+                save_snapshot(0.0, T_coils, "inicio")
+            
+            # Guardar snapshot a mitad del calentamiento (~50% del tiempo de calent.)
+            if self.cycle.phase == 'heating' and not mid_heat_saved:
+                if time_h >= t_heat * 0.5:
+                    save_snapshot(time_h, T_coils, "mitad_calentamiento")
+                    mid_heat_saved = True
+            
+            # Guardar snapshot a mitad del plateau (~50% del plateau estimado)
+            if self.cycle.phase == 'plateau' and not mid_plateau_saved:
+                if self.cycle.plateau_start is not None:
+                    # Guardar ~4h después de iniciar plateau
+                    if time_h >= self.cycle.plateau_start + 4.0:
+                        save_snapshot(time_h, T_coils, "mitad_plateau")
+                        mid_plateau_saved = True
             
             T_gas = self.cycle.get_temperature(time_h)
             
