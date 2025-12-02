@@ -67,13 +67,13 @@ class FurnaceConfig:
     Configuración de COMPROMISO: plateau ~9h con ΔT ~100°C
     """
     total_gas_flow: float = 150.0  # m³/h de H2
-    convection_enhancement: float = 4.0  # Factor ψ para convección (COMPROMISO)
+    convection_enhancement: float = 6.0  # Factor ψ para convección (COMPROMISO)
     radiation_enhancement: float = 1.0  # Factor ξ
     inter_coil_conductance: float = 100.0  # W/(m²·K) - conductancia entre bobinas
     position_factor: float = 0.15  # Penalización para bobinas del medio
     compressive_stress: float = 8e6  # Pa - Presión entre capas (8 MPa típico)
     # Factor de calibración industrial (COMPROMISO: λr moderado para ΔT visible)
-    industrial_calibration: float = 1.25
+    industrial_calibration: float = 1.2
 
 
 # =============================================================================
