@@ -1,6 +1,5 @@
 """
 Aplicación Streamlit para Simulación de Recocido en Campana
-Versión 2.0 - Con modelo calibrado (405 corridas reales)
 """
 
 import streamlit as st
@@ -9,11 +8,11 @@ import matplotlib.pyplot as plt
 from steel_profiles import (SteelProfile, SteelProfileLibrary, Coil, 
                             FurnaceStack, create_quick_coil)
 from bell_annealing_v2 import (BellAnnealingSimulatorV2, FurnaceConfig, 
-                                AnnealingCycle, CalibratedModel)
+                                AnnealingCycle)
 
 # Configuración de página
 st.set_page_config(
-    page_title="Simulador de Recocido v2.0",
+    page_title="Simulador de Recocido",
     page_icon="🔥",
     layout="wide"
 )
@@ -77,8 +76,7 @@ plt.close(fig_mini)
 # CONTENIDO PRINCIPAL
 # =============================================================================
 
-st.title("🔥 Simulador de Recocido en Campana v2.0")
-st.caption("Modelo calibrado con 405 corridas reales | Interacción térmica entre bobinas")
+st.title("🔥 Simulador de Recocido en Campana")
 
 # Tabs
 tab1, tab2, tab3, tab4 = st.tabs(["📋 Perfiles de Acero", "🔩 Configurar Bobinas", 
@@ -204,16 +202,6 @@ with tab2:
             st.metric("Total bobinas", st.session_state.stack.num_coils)
             total_mass = sum(c.mass for c in st.session_state.stack.coils)
             st.metric("Masa total", f"{total_mass:,.0f} kg")
-            
-            # Predicción rápida con modelo empírico
-            if st.session_state.stack.num_coils >= 3:
-                avg_width = np.mean([c.width * 1000 for c in st.session_state.stack.coils])
-                avg_thick = np.mean([c.thickness * 1000 for c in st.session_state.stack.coils])
-                n_bob = st.session_state.stack.num_coils
-                
-                t_pred = CalibratedModel.predict_plateau_time(avg_width, avg_thick, T_plateau, n_bob)
-                
-                st.info(f"⏱️ **Predicción rápida:** ~{t_pred:.1f}h de plateau")
 
 # =============================================================================
 # TAB 3: Simular
@@ -248,20 +236,8 @@ with tab3:
         
         st.divider()
         
-        # Predicción empírica
-        avg_width = np.mean([c.width * 1000 for c in st.session_state.stack.coils])
-        avg_thick = np.mean([c.thickness * 1000 for c in st.session_state.stack.coils])
-        n_bob = st.session_state.stack.num_coils
-        
-        t_empirico = CalibratedModel.predict_plateau_time(avg_width, avg_thick, T_plateau, n_bob)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("📊 Predicción Empírica", f"{t_empirico:.1f} h", 
-                     help="Basado en regresión con 405 corridas reales")
-        
         # Botón de simulación
-        if st.button("🚀 INICIAR SIMULACIÓN FÍSICA", type="primary", use_container_width=True):
+        if st.button("🚀 INICIAR SIMULACIÓN", type="primary", use_container_width=True):
             
             with st.spinner("Simulando... (esto puede tomar 1-2 minutos)"):
                 # Configurar
@@ -269,8 +245,7 @@ with tab3:
                     total_gas_flow=float(gas_flow),
                     convection_enhancement=float(psi),
                     inter_coil_conductance=100.0,
-                    position_factor=0.15,
-                    industrial_calibration=2.5  # Configuración de compromiso
+                    position_factor=0.15
                 )
                 
                 cycle = AnnealingCycle(
@@ -323,8 +298,6 @@ with tab3:
             with col2:
                 if res['plateau_duration']:
                     st.metric("⏸️ Duración Plateau", f"{res['plateau_duration']:.2f} h")
-                    delta = res['plateau_duration'] - t_empirico
-                    st.caption(f"vs empírico: {delta:+.2f}h")
             
             with col3:
                 total_time = heating_time + (res['plateau_duration'] or 0) + cooling_time
@@ -531,16 +504,10 @@ with tab4:
     st.header("Guía de Uso")
     
     st.markdown("""
-    ### 🔥 Simulador de Recocido en Campana v2.0
+    ### 🔥 Simulador de Recocido en Campana
     
     Esta aplicación simula el proceso de recocido de bobinas de acero en hornos de campana
     con atmósfera de hidrógeno.
-    
-    #### Mejoras de la versión 2.0:
-    - ✅ **Interacción térmica entre bobinas** (ya no son independientes)
-    - ✅ **Efecto de posición** en el stack (bobinas del medio tardan más)
-    - ✅ **Modelo empírico calibrado** con 405 corridas reales
-    - ✅ **Predicción rápida** sin necesidad de simular
     
     ---
     
@@ -562,15 +529,6 @@ with tab4:
     
     ---
     
-    ### Precisión del modelo:
-    
-    | Modelo | Error típico | Uso recomendado |
-    |--------|--------------|-----------------|
-    | Empírico | ±0.7h | Predicción rápida |
-    | Físico | ±1.0h | Comparación de configuraciones |
-    
-    ---
-    
     ### Perfiles de acero predefinidos:
     
     - **SPCC**: Laminado en frío comercial (JIS G3141)
@@ -583,5 +541,4 @@ with tab4:
 
 # Footer
 st.sidebar.divider()
-st.sidebar.caption("v2.0 | Calibrado con 405 corridas")
 st.sidebar.caption("© 2025 - Modelo de Recocido")
